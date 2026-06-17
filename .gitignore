@@ -1,0 +1,7 @@
+# simulation artifacts
+sim_build/
+*.vcd
+results.xml
+__pycache__/
+# local python env
+.venv/
