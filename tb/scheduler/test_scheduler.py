@@ -7,6 +7,7 @@ tRCD   = 40
 tRRD_S = 8
 tCCD_S = 8
 tCCD_L = 12
+tFAW   = 36
 CMD_NOP, CMD_ACT, CMD_RD, CMD_WR, CMD_PRE, CMD_REF = range(6)
 
 def set_req(dut, banks):
@@ -30,7 +31,6 @@ async def reset(dut):
     await FallingEdge(dut.clk)
 
 async def column_gap(dut, bank_a, bank_b, horizon=90):
-    # reset, request reads on two banks, return {bank: cycle of its RD on the bus}
     await reset(dut)
     await RisingEdge(dut.clk)
     set_req(dut, {bank_a: 0, bank_b: 0})
@@ -46,11 +46,27 @@ async def column_gap(dut, bank_a, bank_b, horizon=90):
         await RisingEdge(dut.clk)
     return rd_cyc
 
+async def activate_cycles(dut, banks, horizon=60):
+    await reset(dut)
+    await RisingEdge(dut.clk)
+    set_req(dut, {b: 0 for b in banks})
+    act_cyc = {}
+    for cyc in range(horizon):
+        await FallingEdge(dut.clk)
+        if int(dut.cmd.value) == CMD_ACT:
+            b = int(dut.cmd_bank.value)
+            if b in banks and b not in act_cyc:
+                act_cyc[b] = cyc
+        if len(act_cyc) == len(banks):
+            break
+        await RisingEdge(dut.clk)
+    return act_cyc
+
 @cocotb.test()
-async def scheduler_stage2(dut):
+async def scheduler_stage3(dut):
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
 
-    # --- scenario 1: fixed priority + parallel progress (activates now tRRD-spaced) ---
+    # --- scenario 1: fixed priority + parallel progress ---
     await reset(dut)
     await RisingEdge(dut.clk)
     set_req(dut, {2: 0, 5: 0})
@@ -68,14 +84,24 @@ async def scheduler_stage2(dut):
     assert (busy >> 2) & 1 and (busy >> 5) & 1, "both banks active in parallel"
     dut._log.info("arbitration + parallelism OK (bank 2 first, both active)")
 
-    # --- scenario 2: same-group (tCCD_L) vs different-group (tCCD_S) column spacing ---
-    same  = await column_gap(dut, 0, 1)   # banks 0,1 share bank group 0
+    # --- scenario 2: same-group (tCCD_L) vs cross-group (tCCD_S) column spacing ---
+    same  = await column_gap(dut, 0, 1)
     same_gap = same[1] - same[0]
-    cross = await column_gap(dut, 0, 4)   # bank 0 in group 0, bank 4 in group 1
+    cross = await column_gap(dut, 0, 4)
     cross_gap = cross[4] - cross[0]
     dut._log.info(f"same-group column gap = {same_gap} (tCCD_L), cross-group gap = {cross_gap} (tCCD_S)")
-
     assert same_gap == tCCD_L, f"same-group columns should be tCCD_L={tCCD_L} apart, got {same_gap}"
     assert cross_gap == tCCD_S, f"cross-group columns should be tCCD_S={tCCD_S} apart, got {cross_gap}"
     assert same_gap > cross_gap, "bank-group benefit: same-group spacing must exceed cross-group"
-    dut._log.info("bank-group spacing OK: same-group columns wait longer than cross-group")
+
+    # --- scenario 3: tFAW rolling four-activate window ---
+    acts = await activate_cycles(dut, [0, 1, 2, 3, 4])
+    seq = [acts[b] for b in [0, 1, 2, 3, 4]]
+    dut._log.info(f"activate cycles = {seq}")
+    for i in range(1, 4):
+        assert seq[i] - seq[i - 1] == tRRD_S, \
+            f"first four activates should be tRRD={tRRD_S} apart, got {seq}"
+    assert seq[4] == tFAW, f"fifth activate should land at tFAW={tFAW}, got {seq[4]}"
+    assert seq[4] - seq[0] == tFAW, "fifth activate must be tFAW after the first"
+    assert seq[4] - seq[3] > tRRD_S, "tFAW must stall the fifth activate beyond the tRRD chain"
+    dut._log.info(f"tFAW OK: fifth activate stalled to {seq[4]} (tRRD chain alone would allow {seq[3] + tRRD_S})")

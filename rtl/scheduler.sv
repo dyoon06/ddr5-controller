@@ -9,29 +9,48 @@ module scheduler
   output logic [$clog2(NUM_BANK)-1:0] cmd_bank,
   output logic [NUM_BANK-1:0]         bank_busy
 );
-  localparam int BID_W = $clog2(NUM_BANK);
+  localparam int BID_W  = $clog2(NUM_BANK);
+  localparam int FAWI_W = $clog2(FAW_DEPTH);
 
   bank_phase_e        phase      [NUM_BANK];
   logic [TIMER_W-1:0] timer      [NUM_BANK];
   logic               w_is_write [NUM_BANK];
 
-  // bank-group inter-command spacing timers (the new stage-two state)
-  logic [BGT_W-1:0] ccd_l [NUM_BG];   // column-to-column, same group  (per bank group)
-  logic [BGT_W-1:0] ccd_s;            // column-to-column, any group   (global, short)
-  logic [BGT_W-1:0] rrd_l [NUM_BG];   // act-to-act,       same group  (per bank group)
-  logic [BGT_W-1:0] rrd_s;            // act-to-act,       any group   (global, short)
+  // bank-group inter-command spacing timers
+  logic [BGT_W-1:0] ccd_l [NUM_BG];
+  logic [BGT_W-1:0] ccd_s;
+  logic [BGT_W-1:0] rrd_l [NUM_BG];
+  logic [BGT_W-1:0] rrd_s;
+
+  // rolling four-activate window: FAW_DEPTH slots, each counts down tFAW after an ACT.
+  // An ACT may issue only if at least one slot is free (zero), so at most FAW_DEPTH
+  // activates can be "in flight" within any tFAW-cycle window.
+  logic [FAWT_W-1:0] faw [FAW_DEPTH];
+  logic              faw_ok;
+  logic [FAWI_W-1:0] faw_free_idx;
+
+  always_comb begin
+    faw_ok = 1'b0;
+    for (int i = 0; i < FAW_DEPTH; i++)
+      if (faw[i] == 0) faw_ok = 1'b1;
+  end
+  always_comb begin
+    faw_free_idx = '0;
+    for (int i = FAW_DEPTH - 1; i >= 0; i--)
+      if (faw[i] == 0) faw_free_idx = FAWI_W'(i);
+  end
 
   cmd_e                want_cmd   [NUM_BANK];
   logic [NUM_BANK-1:0] want_valid;
 
-  // each bank decides what it wants this cycle, now gated by bank-group spacing
+  // each bank decides what it wants; ACT now also gated by the tFAW window
   always_comb begin
     for (int b = 0; b < NUM_BANK; b++) begin
       want_cmd[b]   = CMD_NOP;
       want_valid[b] = 1'b0;
       case (phase[b])
         BANK_IDLE:
-          if (req_valid[b] && rrd_l[b >> BA_BITS] == 0 && rrd_s == 0) begin
+          if (req_valid[b] && rrd_l[b >> BA_BITS] == 0 && rrd_s == 0 && faw_ok) begin
             want_cmd[b]   = CMD_ACT;
             want_valid[b] = 1'b1;
           end
@@ -80,23 +99,27 @@ module scheduler
       end
       ccd_s <= '0;
       rrd_s <= '0;
+      for (int j = 0; j < FAW_DEPTH; j++) faw[j] <= '0;
     end else begin
-      // bank-group spacing timers tick down independently
+      // spacing timers and the tFAW slots tick down independently
       if (ccd_s != 0) ccd_s <= ccd_s - 1'b1;
       if (rrd_s != 0) rrd_s <= rrd_s - 1'b1;
       for (int k = 0; k < NUM_BG; k++) begin
         if (ccd_l[k] != 0) ccd_l[k] <= ccd_l[k] - 1'b1;
         if (rrd_l[k] != 0) rrd_l[k] <= rrd_l[k] - 1'b1;
       end
+      for (int j = 0; j < FAW_DEPTH; j++)
+        if (faw[j] != 0) faw[j] <= faw[j] - 1'b1;
 
-      // on a grant, arm the spacing timers for that command's bank group
+      // on a grant, arm the spacing timers and (for an ACT) occupy a tFAW slot
       if (grant_valid) begin
         if (phase[grant_bank] == BANK_IDLE) begin                 // an ACT was granted
           rrd_l[grant_bank[BID_W-1 -: BG_BITS]] <= BGT_W'(tRRD_L - 1);
-          rrd_s                        <= BGT_W'(tRRD_S - 1);
+          rrd_s                                 <= BGT_W'(tRRD_S - 1);
+          faw[faw_free_idx]                     <= FAWT_W'(tFAW - 1);
         end else if (phase[grant_bank] == BANK_ACTIVATING) begin  // a column was granted
           ccd_l[grant_bank[BID_W-1 -: BG_BITS]] <= BGT_W'(tCCD_L - 1);
-          ccd_s                        <= BGT_W'(tCCD_S - 1);
+          ccd_s                                 <= BGT_W'(tCCD_S - 1);
         end
       end
 

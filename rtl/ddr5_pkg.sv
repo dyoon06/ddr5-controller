@@ -33,6 +33,13 @@ package ddr5_pkg;
   localparam int tRRD_L = 8;
   localparam int BGT_W  = $clog2(tCCD_L + 1);
 
+  // ---- Rolling four-activate window ----
+  // JEDEC floor tFAW = 4*tRRD_S = 32 (coincident with the tRRD chain, so non-binding there).
+  // Real value is page-size dependent; 36 is representative and >32 so the window actually binds.
+  localparam int tFAW      = 36;
+  localparam int FAW_DEPTH = 4;
+  localparam int FAWT_W    = $clog2(tFAW + 1);
+
   // ---- Request transaction ----
   localparam int DATA_BITS = 64;
   localparam int ID_BITS   = 4;
