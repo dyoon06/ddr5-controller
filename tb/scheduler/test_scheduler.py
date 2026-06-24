@@ -1,0 +1,65 @@
+import cocotb
+from cocotb.clock import Clock
+from cocotb.triggers import RisingEdge, FallingEdge
+
+NUM_BANK = 16
+tRCD = 40
+CMD_NOP, CMD_ACT, CMD_RD, CMD_WR, CMD_PRE, CMD_REF = range(6)
+
+def set_req(dut, banks):
+    rv = 0
+    wv = 0
+    for b, w in banks.items():
+        rv |= (1 << b)
+        if w:
+            wv |= (1 << b)
+    dut.req_valid.value = rv
+    dut.req_is_write.value = wv
+
+async def reset(dut):
+    dut.req_valid.value = 0
+    dut.req_is_write.value = 0
+    dut.rst_n.value = 0
+    for _ in range(3):
+        await RisingEdge(dut.clk)
+    dut.rst_n.value = 1
+    await RisingEdge(dut.clk)
+    await FallingEdge(dut.clk)
+
+@cocotb.test()
+async def two_banks_arbitrate(dut):
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    # cycle 1: banks 2 and 5 both request a read; lowest index (2) wins the shared bus
+    await RisingEdge(dut.clk)
+    set_req(dut, {2: 0, 5: 0})
+    await FallingEdge(dut.clk)
+    assert int(dut.cmd.value) == CMD_ACT, "expected an ACT on the bus"
+    assert int(dut.cmd_bank.value) == 2, f"fixed priority: bank 2 should win, got {int(dut.cmd_bank.value)}"
+
+    # cycle 2: bank 2 moved to activating; bank 5 still idle and now wins the bus
+    await RisingEdge(dut.clk)
+    await FallingEdge(dut.clk)
+    assert int(dut.cmd.value) == CMD_ACT, "expected bank 5's ACT this cycle"
+    assert int(dut.cmd_bank.value) == 5, f"bank 5 should win now, got {int(dut.cmd_bank.value)}"
+
+    # cycle 3: both banks now active in parallel; drop the requests
+    await RisingEdge(dut.clk)
+    set_req(dut, {})
+    await FallingEdge(dut.clk)
+    busy = int(dut.bank_busy.value)
+    assert (busy >> 2) & 1, "bank 2 should be busy"
+    assert (busy >> 5) & 1, "bank 5 should be busy"
+    dut._log.info("both banks busy in parallel through one shared bus (timers overlap)")
+
+    # bank 2's tRCD expires first; it issues its column command (RD) on its own
+    saw_rd2 = False
+    for _ in range(tRCD + 5):
+        await RisingEdge(dut.clk)
+        await FallingEdge(dut.clk)
+        if int(dut.cmd.value) == CMD_RD and int(dut.cmd_bank.value) == 2:
+            saw_rd2 = True
+            break
+    assert saw_rd2, "bank 2 never issued its column command after its independent tRCD countdown"
+    dut._log.info("bank 2 issued RD after its own tRCD, independent of bank 5")
