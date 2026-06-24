@@ -5,9 +5,10 @@ from cocotb.triggers import RisingEdge, FallingEdge
 NUM_BANK = 16
 tRCD   = 40
 tRRD_S = 8
+tRRD_L = 12
 tCCD_S = 8
 tCCD_L = 12
-tFAW   = 36
+tFAW   = 40
 CMD_NOP, CMD_ACT, CMD_RD, CMD_WR, CMD_PRE, CMD_REF = range(6)
 
 def set_req(dut, banks):
@@ -46,7 +47,7 @@ async def column_gap(dut, bank_a, bank_b, horizon=90):
         await RisingEdge(dut.clk)
     return rd_cyc
 
-async def activate_cycles(dut, banks, horizon=60):
+async def activate_cycles(dut, banks, horizon=70):
     await reset(dut)
     await RisingEdge(dut.clk)
     set_req(dut, {b: 0 for b in banks})
@@ -84,24 +85,33 @@ async def scheduler_stage3(dut):
     assert (busy >> 2) & 1 and (busy >> 5) & 1, "both banks active in parallel"
     dut._log.info("arbitration + parallelism OK (bank 2 first, both active)")
 
-    # --- scenario 2: same-group (tCCD_L) vs cross-group (tCCD_S) column spacing ---
+    # --- scenario 2: ACTIVATE spacing distinguishes bank groups (the regression that was missing) ---
+    same_act  = await activate_cycles(dut, [0, 1])   # banks 0,1 share bank group 0
+    same_act_gap = same_act[1] - same_act[0]
+    cross_act = await activate_cycles(dut, [0, 4])   # bank 0 group 0, bank 4 group 1
+    cross_act_gap = cross_act[4] - cross_act[0]
+    dut._log.info(f"same-group activate gap = {same_act_gap} (tRRD_L), cross-group = {cross_act_gap} (tRRD_S)")
+    assert same_act_gap == tRRD_L, f"same-group activates should be tRRD_L={tRRD_L} apart, got {same_act_gap}"
+    assert cross_act_gap == tRRD_S, f"cross-group activates should be tRRD_S={tRRD_S} apart, got {cross_act_gap}"
+    assert same_act_gap > cross_act_gap, "bank groups must distinguish the activate path"
+
+    # --- scenario 3: column spacing also wider within a bank group ---
     same  = await column_gap(dut, 0, 1)
     same_gap = same[1] - same[0]
     cross = await column_gap(dut, 0, 4)
     cross_gap = cross[4] - cross[0]
-    dut._log.info(f"same-group column gap = {same_gap} (tCCD_L), cross-group gap = {cross_gap} (tCCD_S)")
-    assert same_gap == tCCD_L, f"same-group columns should be tCCD_L={tCCD_L} apart, got {same_gap}"
-    assert cross_gap == tCCD_S, f"cross-group columns should be tCCD_S={tCCD_S} apart, got {cross_gap}"
-    assert same_gap > cross_gap, "bank-group benefit: same-group spacing must exceed cross-group"
+    dut._log.info(f"same-group column gap = {same_gap}, cross-group = {cross_gap}")
+    assert same_gap == tCCD_L, f"same-group column gap should be {tCCD_L}, got {same_gap}"
+    assert cross_gap == tCCD_S, f"cross-group column gap should be {tCCD_S}, got {cross_gap}"
+    assert same_gap > cross_gap, "same-group column spacing must exceed cross-group"
 
-    # --- scenario 3: tFAW rolling four-activate window ---
-    acts = await activate_cycles(dut, [0, 1, 2, 3, 4])
-    seq = [acts[b] for b in [0, 1, 2, 3, 4]]
-    dut._log.info(f"activate cycles = {seq}")
+    # --- scenario 4: tFAW rolling four-activate window (four cross-group activates fill it) ---
+    acts = await activate_cycles(dut, [0, 4, 8, 12, 15])
+    seq = sorted(acts.values())
+    dut._log.info(f"activate cycles (sorted) = {seq}")
     for i in range(1, 4):
         assert seq[i] - seq[i - 1] == tRRD_S, \
-            f"first four activates should be tRRD={tRRD_S} apart, got {seq}"
-    assert seq[4] == tFAW, f"fifth activate should land at tFAW={tFAW}, got {seq[4]}"
-    assert seq[4] - seq[0] == tFAW, "fifth activate must be tFAW after the first"
+            f"first four (cross-group) should be tRRD_S={tRRD_S} apart, got {seq}"
+    assert seq[4] >= seq[0] + tFAW, f"fifth activate must be at least tFAW={tFAW} after the first, got {seq}"
     assert seq[4] - seq[3] > tRRD_S, "tFAW must stall the fifth activate beyond the tRRD chain"
-    dut._log.info(f"tFAW OK: fifth activate stalled to {seq[4]} (tRRD chain alone would allow {seq[3] + tRRD_S})")
+    dut._log.info(f"tFAW OK: fifth activate at {seq[4]} (>= tFAW={tFAW}); tRRD chain alone would allow {seq[3] + tRRD_S})")

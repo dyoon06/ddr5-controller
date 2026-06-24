@@ -25,18 +25,19 @@ package ddr5_pkg;
   localparam int TIMER_W = $clog2(WR_COL_TO_FREE + 1);
 
   // ---- Bank-group inter-command timing ----
-  // JEDEC DDR5-4800: tRRD_S = tRRD_L = 8 (7.5 ns floor); tCCD_S = BL/2 = 8.
-  // tCCD_L (same-group CAS-to-CAS) is larger; 12 is representative, pinnable to exact JEDEC.
+  // JEDEC DDR5-4800: tRRD_S = 8 nCK (~3.3 ns); tRRD_L = max(8 nCK, 5 ns) = 12 cycles
+  // (5 ns = 12 tCK at 2400 MHz; some references round to 13). tCCD_S = BL/2 = 8.
+  // tCCD_L (read, same group) is representative at 12; not yet pinned to exact JEDEC.
   localparam int tCCD_S = 8;
   localparam int tCCD_L = 12;
   localparam int tRRD_S = 8;
-  localparam int tRRD_L = 8;
-  localparam int BGT_W  = $clog2(tCCD_L + 1);
+  localparam int tRRD_L = 12;
+  localparam int BGT_W  = $clog2((tCCD_L > tRRD_L ? tCCD_L : tRRD_L) + 1);
 
   // ---- Rolling four-activate window ----
-  // JEDEC floor tFAW = 4*tRRD_S = 32 (coincident with the tRRD chain, so non-binding there).
-  // Real value is page-size dependent; 36 is representative and >32 so the window actually binds.
-  localparam int tFAW      = 36;
+  // JEDEC DDR5-4800: tFAW = 32 nCK (1KB page) or 40 nCK (2KB page).
+  // Using 40 (2KB): > 4*tRRD_S=32, so the window actually binds.
+  localparam int tFAW      = 40;
   localparam int FAW_DEPTH = 4;
   localparam int FAWT_W    = $clog2(tFAW + 1);
 
