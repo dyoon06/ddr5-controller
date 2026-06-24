@@ -8,23 +8,30 @@ package ddr5_pkg;
   localparam int NUM_BANK  = 1 << (BG_BITS + BA_BITS);
   localparam int ADDR_BITS = BG_BITS + BA_BITS + COL_BITS + ROW_BITS;
 
-  // ---- Timing: DDR5-4800, command clock 2400 MHz, tCK ~= 0.417 ns. Cycle counts. ----
-  localparam int tRCD = 40;   // 16.7 ns : ACT -> column
-  localparam int tRP  = 40;   // 16.7 ns : precharge
-  localparam int tRAS = 77;   // 32 ns   : min row-open before precharge
-  localparam int tRC  = 117;  // tRAS + tRP : ACT -> ACT
-  localparam int tRTP = 18;   // max(12 nCK, 7.5 ns) -> 7.5 ns dominates at 2400 MHz
-  localparam int tWR  = 72;   // 30 ns   : write recovery
-  localparam int CL   = 40;   // CAS latency
-  localparam int tCWL = 38;   // ~ CL-2 : CAS write latency
+  // ---- Intra-bank timing: DDR5-4800, command clock 2400 MHz, tCK ~= 0.417 ns. ----
+  localparam int tRCD = 40;
+  localparam int tRP  = 40;
+  localparam int tRAS = 77;
+  localparam int tRC  = 117;
+  localparam int tRTP = 18;
+  localparam int tWR  = 72;
+  localparam int CL   = 40;
+  localparam int tCWL = 38;
   localparam int BL        = 16;
-  localparam int BURST_CYC = BL / 2;   // 8 burst cycles for BL16
+  localparam int BURST_CYC = BL / 2;   // 8
 
-  // derived: column-command -> bank-idle, per direction
   localparam int RD_COL_TO_FREE = ((tRTP > (tRAS - tRCD)) ? tRTP : (tRAS - tRCD)) + tRP;
   localparam int WR_COL_TO_FREE = tCWL + BURST_CYC + tWR + tRP;
+  localparam int TIMER_W = $clog2(WR_COL_TO_FREE + 1);
 
-  localparam int TIMER_W = $clog2(WR_COL_TO_FREE + 1);  // widest (write) busy window
+  // ---- Bank-group inter-command timing ----
+  // JEDEC DDR5-4800: tRRD_S = tRRD_L = 8 (7.5 ns floor); tCCD_S = BL/2 = 8.
+  // tCCD_L (same-group CAS-to-CAS) is larger; 12 is representative, pinnable to exact JEDEC.
+  localparam int tCCD_S = 8;
+  localparam int tCCD_L = 12;
+  localparam int tRRD_S = 8;
+  localparam int tRRD_L = 8;
+  localparam int BGT_W  = $clog2(tCCD_L + 1);
 
   // ---- Request transaction ----
   localparam int DATA_BITS = 64;
