@@ -35,11 +35,17 @@ package ddr5_pkg;
   localparam int BGT_W  = $clog2((tCCD_L > tRRD_L ? tCCD_L : tRRD_L) + 1);
 
   // ---- Rolling four-activate window ----
-  // JEDEC DDR5-4800: tFAW = 32 nCK (1KB page) or 40 nCK (2KB page).
-  // Using 40 (2KB): > 4*tRRD_S=32, so the window actually binds.
+  // JEDEC DDR5-4800: tFAW = 32 nCK (1KB page) or 40 nCK (2KB page). Using 40 (>4*tRRD_S=32, binds).
   localparam int tFAW      = 40;
   localparam int FAW_DEPTH = 4;
   localparam int FAWT_W    = $clog2(tFAW + 1);
+
+  // ---- Refresh: DDR5-4800, 16Gb device, normal all-bank (REFab) mode ----
+  // tREFI = 7.8 us average interval = 18720 cycles at 2400 MHz.
+  // tRFC1 (all-bank, 16Gb) = 295 ns = 708 cycles (8Gb ~195 ns, 24Gb ~410 ns; density-dependent).
+  // FGR tRFC2 / same-bank tRFCsb exist (16Gb ~160 / ~130 ns) but are out of scope for this engine.
+  localparam int tREFI = 18720;
+  localparam int tRFC  = 708;
 
   // ---- Request transaction ----
   localparam int DATA_BITS = 64;
