@@ -1,13 +1,18 @@
 module scheduler
   import ddr5_pkg::*;
-(
+#(
+  parameter int REFI = tREFI,   // refresh interval, cycles (overridable for test)
+  parameter int RFC  = tRFC     // refresh cycle time / bus block, cycles
+)(
   input  logic                        clk,
   input  logic                        rst_n,
   input  logic [NUM_BANK-1:0]         req_valid,
   input  logic [NUM_BANK-1:0]         req_is_write,
   output cmd_e                        cmd,
   output logic [$clog2(NUM_BANK)-1:0] cmd_bank,
-  output logic [NUM_BANK-1:0]         bank_busy
+  output logic [NUM_BANK-1:0]         bank_busy,
+  output logic                        ref_active,       // a refresh owns/blocks the bus this cycle
+  output logic [3:0]                  ref_pending_cnt
 );
   localparam int BID_W  = $clog2(NUM_BANK);
   localparam int FAWI_W = $clog2(FAW_DEPTH);
@@ -22,12 +27,27 @@ module scheduler
   logic [BGT_W-1:0] rrd_l [NUM_BG];
   logic [BGT_W-1:0] rrd_s;
 
-  // rolling four-activate window: FAW_DEPTH slots, each counts down tFAW after an ACT.
-  // An ACT may issue only if at least one slot is free (zero), so at most FAW_DEPTH
-  // activates can be "in flight" within any tFAW-cycle window.
+  // rolling four-activate window
   logic [FAWT_W-1:0] faw [FAW_DEPTH];
   logic              faw_ok;
   logic [FAWI_W-1:0] faw_free_idx;
+
+  // ---- refresh engine: shares the command bus, blocks all banks for tRFC ----
+  logic all_banks_idle;
+  logic ref_issue, ref_blocking;
+  assign all_banks_idle = (bank_busy == '0);   // every bank precharged/idle (closed page)
+
+  refresh_ctrl #(.REFI(REFI), .RFC(RFC)) u_refresh (
+    .clk             (clk),
+    .rst_n           (rst_n),
+    .all_banks_idle  (all_banks_idle),
+    .ref_issue       (ref_issue),
+    .ref_blocking    (ref_blocking),
+    .ref_pending_cnt (ref_pending_cnt)
+  );
+  // refresh owns the bus on the issue cycle and holds it through the tRFC block
+  wire ref_busy = ref_issue || ref_blocking;
+  assign ref_active = ref_busy;
 
   always_comb begin
     faw_ok = 1'b0;
@@ -43,7 +63,7 @@ module scheduler
   cmd_e                want_cmd   [NUM_BANK];
   logic [NUM_BANK-1:0] want_valid;
 
-  // each bank decides what it wants; ACT now also gated by the tFAW window
+  // each bank decides what it wants; ACT gated by tRRD/tFAW, column by tCCD
   always_comb begin
     for (int b = 0; b < NUM_BANK; b++) begin
       want_cmd[b]   = CMD_NOP;
@@ -62,6 +82,7 @@ module scheduler
         default: ;
       endcase
     end
+    if (ref_busy) want_valid = '0;   // refresh holds the bus: no bank may issue
   end
 
   // arbiter: one grant per cycle, lowest bank index wins (fixed priority)
@@ -77,8 +98,9 @@ module scheduler
       end
   end
 
-  assign cmd      = grant_valid ? want_cmd[grant_bank] : CMD_NOP;
-  assign cmd_bank = grant_bank;
+  // refresh takes priority on the shared bus; otherwise the granted bank drives it
+  assign cmd      = ref_issue ? CMD_REF : (grant_valid ? want_cmd[grant_bank] : CMD_NOP);
+  assign cmd_bank = ref_issue ? '0      : grant_bank;
 
   genvar g;
   generate
@@ -123,7 +145,7 @@ module scheduler
         end
       end
 
-      // per-bank phase update (unchanged from stage one)
+      // per-bank phase update
       for (int b = 0; b < NUM_BANK; b++) begin
         case (phase[b])
           BANK_IDLE: if (grant_valid && grant_bank == BID_W'(b)) begin
