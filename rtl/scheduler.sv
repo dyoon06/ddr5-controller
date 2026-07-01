@@ -1,8 +1,9 @@
 module scheduler
   import ddr5_pkg::*;
 #(
-  parameter int REFI = tREFI,   // refresh interval, cycles (overridable for test)
-  parameter int RFC  = tRFC     // refresh cycle time / bus block, cycles
+  parameter int REFI   = tREFI,   // refresh interval, cycles (overridable for test)
+  parameter int RFC    = tRFC,    // refresh cycle time / bus block, cycles
+  parameter int URGENT = 2        // pending-refresh level that forces a bank drain
 )(
   input  logic                        clk,
   input  logic                        rst_n,
@@ -12,6 +13,7 @@ module scheduler
   output logic [$clog2(NUM_BANK)-1:0] cmd_bank,
   output logic [NUM_BANK-1:0]         bank_busy,
   output logic                        ref_active,       // a refresh owns/blocks the bus this cycle
+  output logic                        ref_overflow,     // sticky: refresh obligation was lost
   output logic [3:0]                  ref_pending_cnt
 );
   localparam int BID_W  = $clog2(NUM_BANK);
@@ -34,15 +36,17 @@ module scheduler
 
   // ---- refresh engine: shares the command bus, blocks all banks for tRFC ----
   logic all_banks_idle;
-  logic ref_issue, ref_blocking;
+  logic ref_issue, ref_blocking, ref_urgent;
   assign all_banks_idle = (bank_busy == '0);   // every bank precharged/idle (closed page)
 
-  refresh_ctrl #(.REFI(REFI), .RFC(RFC)) u_refresh (
+  refresh_ctrl #(.REFI(REFI), .RFC(RFC), .URGENT(URGENT)) u_refresh (
     .clk             (clk),
     .rst_n           (rst_n),
     .all_banks_idle  (all_banks_idle),
     .ref_issue       (ref_issue),
     .ref_blocking    (ref_blocking),
+    .ref_urgent      (ref_urgent),
+    .ref_overflow    (ref_overflow),
     .ref_pending_cnt (ref_pending_cnt)
   );
   // refresh owns the bus on the issue cycle and holds it through the tRFC block
@@ -63,14 +67,16 @@ module scheduler
   cmd_e                want_cmd   [NUM_BANK];
   logic [NUM_BANK-1:0] want_valid;
 
-  // each bank decides what it wants; ACT gated by tRRD/tFAW, column by tCCD
+  // each bank decides what it wants; ACT gated by tRRD/tFAW and by refresh urgency,
+  // column by tCCD. Urgency blocks NEW activates only: in-flight banks finish and
+  // drain, which is what lets the all-banks-idle condition ever come true under load.
   always_comb begin
     for (int b = 0; b < NUM_BANK; b++) begin
       want_cmd[b]   = CMD_NOP;
       want_valid[b] = 1'b0;
       case (phase[b])
         BANK_IDLE:
-          if (req_valid[b] && rrd_l[b >> BA_BITS] == 0 && rrd_s == 0 && faw_ok) begin
+          if (req_valid[b] && !ref_urgent && rrd_l[b >> BA_BITS] == 0 && rrd_s == 0 && faw_ok) begin
             want_cmd[b]   = CMD_ACT;
             want_valid[b] = 1'b1;
           end
